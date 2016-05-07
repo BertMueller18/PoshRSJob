@@ -1,43 +1,50 @@
-Function Stop-RSJob {
+Function Remove-RSJob {
     <#
         .SYNOPSIS
-            Stops a Windows PowerShell runspace job.
+            Deletes a Windows PowerShell runspace job.
 
         .DESCRIPTION
-            Stops a Windows PowerShell background job that has been started using Start-RSJob
+            Deletes a Windows PowerShell background job that has been started using Start-RSJob
 
         .PARAMETER Name
-            The name of the jobs to stop..
+            The name of the jobs to remove..
 
         .PARAMETER ID
-            The ID of the jobs to stop.
+            The ID of the jobs to remove.
 
         .PARAMETER InstanceID
-            The GUID of the jobs to stop.
+            The GUID of the jobs to remove.
+
+        .PARAMETER Batch 
+            Name of the set of jobs
             
         .PARAMETER Job
-            The job object to stop.         
+            The job object to remove.  
+            
+        .PARAMETER Force
+            Force a running job to stop prior to being removed.        
 
         .NOTES
-            Name: Stop-RSJob
+            Name: Remove-RSJob
             Author: Boe Prox                
 
         .EXAMPLE
-            Get-RSJob -State Completed | Stop-RSJob
+            Get-RSJob -State Completed | Remove-RSJob
 
             Description
             -----------
-            Stop all jobs with a State of Completed.
+            Deletes all jobs with a State of Completed.
 
         .EXAMPLE
-            Stop-RSJob -ID 1,5,78
+            Remove-RSJob -ID 1,5,78
 
             Description
             -----------
-            Stop jobs with IDs 1,5,78.
+            Removes jobs with IDs 1,5,78.
     #>
     [cmdletbinding(
-        DefaultParameterSetName='Job'
+        DefaultParameterSetName='Job',
+        SupportsShouldProcess = $True
     )]
     Param (
         [parameter(ValueFromPipeline=$True,ValueFromPipelineByPropertyName=$True,
@@ -49,20 +56,28 @@ Function Stop-RSJob {
         [parameter(ValueFromPipeline=$True,ValueFromPipelineByPropertyName=$True,
         ParameterSetName='Guid')]
         [guid[]]$InstanceID,
+        [parameter(ValueFromPipelineByPropertyName=$True,
+        ParameterSetName='Batch')]
+        [string[]]$Batch,
         [parameter(ValueFromPipeline=$True,ParameterSetName='Job')]
-        [PoshRS.PowerShell.RSJob[]]$Job
+        [PoshRS.PowerShell.RSJob[]]$Job,
+        [parameter()]
+        [switch]$Force
     )
     Begin {        
         If ($PSBoundParameters['Debug']) {
             $DebugPreference = 'Continue'
-        }  
-        Write-Debug "Begin"      
+        }      
         $List = New-Object System.Collections.ArrayList
         $StringBuilder = New-Object System.Text.StringBuilder
 
         #Take care of bound parameters
         If ($PSBoundParameters['Name']) {
             [void]$list.AddRange($Name)
+            $Bound = $True
+        }
+        If ($PSBoundParameters['Batch']) {
+            [void]$list.AddRange($Batch)
             $Bound = $True
         }
         If ($PSBoundParameters['Id']) {
@@ -77,7 +92,6 @@ Function Stop-RSJob {
             [void]$list.AddRange($Job)
             $Bound = $True
         }
-        Write-Debug "Process"
     }
     Process {
         If (-Not $Bound) {
@@ -85,7 +99,6 @@ Function Stop-RSJob {
         }
     }
     End {
-        Write-Debug "End"
         Write-Debug "ParameterSet: $($PSCmdlet.parametersetname)"
         Switch ($PSCmdlet.parametersetname) {
             'Name' {
@@ -103,21 +116,34 @@ Function Stop-RSJob {
                 [void]$StringBuilder.Append("`$_.InstanceId -match $Items")   
                 $ScriptBlock = [scriptblock]::Create($StringBuilder.ToString())   
             }
+            'Batch' {
+                $Items = '"{0}"' -f (($list | ForEach {"^{0}$" -f $_}) -join '|')
+                [void]$StringBuilder.Append("`$_.batch -match $Items")   
+                $ScriptBlock = [scriptblock]::Create($StringBuilder.ToString())   
+            } 	
             Default {$ScriptBlock=$Null}
         }
         If ($ScriptBlock) {
             Write-Verbose "Using ScriptBlock"
-            $ToStop = $jobs | Where $ScriptBlock
+            $ToRemove = $PoshRS_jobs | Where $ScriptBlock
         } Else {
-            $ToStop = $List
+            $ToRemove = $List
         }
-        [System.Threading.Monitor]::Enter($Jobs.syncroot) 
-        $ToStop | ForEach {            
-            Write-Verbose "Stopping $($_.InstanceId)"
-            If ($_.State -ne 'Completed') {
-                [void]$_.InnerJob.EndInvoke($_.Handle)
+        [System.Threading.Monitor]::Enter($PoshRS_Jobs.syncroot) 
+        $ToRemove | ForEach {
+            If ($PSCmdlet.ShouldProcess("Name: $($_.Name), associated with JobID $($_.Id)",'Remove')) {
+                If ($_.State -notmatch 'Completed|Failed|Stopped') {
+                    If ($PSBoundParameters.ContainsKey('Force')) {
+                        [void] $_.InnerJob.Stop()
+                        $PoshRS_Jobs.Remove($_)
+                    } Else {
+                        Write-Error "Unable to remove job $($_.InstanceID)"
+                    }
+                } Else {
+                    [void]$PoshRS_Jobs.Remove($_)
+                }
             }
         }
-        [System.Threading.Monitor]::Exit($Jobs.syncroot) 
-    }  
+        [System.Threading.Monitor]::Exit($PoshRS_Jobs.syncroot) 
+    }
 }

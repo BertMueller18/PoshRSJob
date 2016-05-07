@@ -1,161 +1,137 @@
 $ScriptPath = Split-Path $MyInvocation.MyCommand.Path
-#region Custom Object
-Write-Verbose "Creating custom RSJob object"
-Add-Type -TypeDefinition @"
-    using System;
-
-    namespace PoshRS.PowerShell
-    {
-        public class RSJob
-        {
-            public string Name;
-            public int ID;
-            public System.Management.Automation.PSInvocationState State;
-            public System.Guid InstanceID;
-            public object Handle;
-            public object Runspace;
-            public System.Management.Automation.PowerShell InnerJob;
-            public System.Threading.ManualResetEvent Finished;
-            public string Command;
-            public System.Management.Automation.PSDataCollection<System.Management.Automation.ErrorRecord> Error;
-            public System.Management.Automation.PSDataCollection<System.Management.Automation.VerboseRecord> Verbose;
-            public System.Management.Automation.PSDataCollection<System.Management.Automation.DebugRecord> Debug;
-            public System.Management.Automation.PSDataCollection<System.Management.Automation.WarningRecord> Warning;
-            public System.Management.Automation.PSDataCollection<System.Management.Automation.ProgressRecord> Progress;
-            public bool HasMoreData;
-            public bool HasErrors;
-            public object Output;
-            public System.Guid RunspacePoolID;
-        }
-        public class RSRunspacePool
-        {
-            public System.Management.Automation.Runspaces.RunspacePool RunspacePool;
-            public System.Management.Automation.Runspaces.RunspacePoolState State;
-            public int AvailableJobs;
-            public int MaxJobs;
-            public DateTime LastActivity = DateTime.MinValue;
-            public System.Guid RunspacePoolID;
-            public bool CanDispose = false;
-        }
-        public class V2UsingVariable
-        {
-            public string Name;
-            public string NewName;
-            public object Value;
-            public string NewVarName;
-        }
-    }
-"@ -Language CSharpVersion3
-#endregion Custom Object
+$PSModule = $ExecutionContext.SessionState.Module 
+$PSModuleRoot = $PSModule.ModuleBase
 
 #region RSJob Collections
 Write-Verbose "Creating RS collections"
-New-Variable Jobs -Value ([System.Collections.ArrayList]::Synchronized([System.Collections.ArrayList]@())) -Option AllScope,ReadOnly -Scope Global
-New-Variable JobCleanup -Value ([hashtable]::Synchronized(@{})) -Option AllScope,ReadOnly -Scope Global
-New-Variable JobID -Value ([int64]0) -Option AllScope,ReadOnly -Scope Global
-New-Variable RunspacePools -Value ([System.Collections.ArrayList]::Synchronized([System.Collections.ArrayList]@())) -Option AllScope,ReadOnly -Scope Global
-New-Variable RunspacePoolCleanup -Value ([hashtable]::Synchronized(@{})) -Option AllScope,ReadOnly -Scope Global
+New-Variable PoshRS_Jobs -Value ([System.Collections.ArrayList]::Synchronized([System.Collections.ArrayList]@())) -Option ReadOnly -Scope Global
+New-Variable PoshRS_jobCleanup -Value ([hashtable]::Synchronized(@{})) -Option ReadOnly -Scope Global
+New-Variable PoshRS_JobID -Value ([int64]0) -Option ReadOnly -Scope Global
+New-Variable PoshRS_RunspacePools -Value ([System.Collections.ArrayList]::Synchronized([System.Collections.ArrayList]@())) -Option ReadOnly -Scope Global
+New-Variable PoshRS_RunspacePoolCleanup -Value ([hashtable]::Synchronized(@{})) -Option ReadOnly -Scope Global
 #endregion RSJob Collections
 
 #region Cleanup Routine
 Write-Verbose "Creating routine to monitor RS jobs"
-$jobCleanup.Flag=$True
-$jobcleanup.Runspace =[runspacefactory]::CreateRunspace()   
-$jobcleanup.Runspace.Open()         
-$jobcleanup.Runspace.SessionStateProxy.SetVariable("jobCleanup",$jobCleanup)     
-$jobcleanup.Runspace.SessionStateProxy.SetVariable("jobs",$jobs) 
-$jobCleanup.PowerShell = [PowerShell]::Create().AddScript({
+$PoshRS_jobCleanup.Flag=$True
+$PoshRS_jobCleanup.Host = $Host
+$PoshRS_jobCleanup.Runspace =[runspacefactory]::CreateRunspace()   
+$PoshRS_jobCleanup.Runspace.Open()         
+$PoshRS_jobCleanup.Runspace.SessionStateProxy.SetVariable("PoshRS_jobCleanup",$PoshRS_jobCleanup)     
+$PoshRS_jobCleanup.Runspace.SessionStateProxy.SetVariable("PoshRS_Jobs",$PoshRS_Jobs) 
+$PoshRS_jobCleanup.PowerShell = [PowerShell]::Create().AddScript({
     #Routine to handle completed runspaces
+    #$PoshRS_jobCleanup.Host.UI.WriteVerboseLine("Begin Do Loop") 
     Do {   
-        [System.Threading.Monitor]::Enter($Jobs.syncroot) 
-        Foreach($job in $jobs) {
+        [System.Threading.Monitor]::Enter($PoshRS_Jobs.syncroot) 
+        Foreach($job in $PoshRS_Jobs) {
             $job.state = $job.InnerJob.InvocationStateInfo.State
-            If ($job.Handle.isCompleted) {                
-                $data = $job.InnerJob.EndInvoke($job.Handle)
-                If ($job.InnerJob.Streams.Error) {
+            If ($job.Handle.isCompleted -AND (-NOT $Job.Completed)) {   
+                #$PoshRS_jobCleanup.Host.UI.WriteVerboseLine("$($Job.Id) completed")  
+                Try {           
+                    $Data = $job.InnerJob.EndInvoke($job.Handle)
+                } Catch {
+                    $CaughtErrors = $Error
+                    #$PoshRS_jobCleanup.Host.UI.WriteVerboseLine("$($Job.Id) Caught terminating Error in job: $_") 
+                }
+                #$PoshRS_jobCleanup.Host.UI.WriteVerboseLine("$($Job.Id) Checking for errors") 
+                If ($job.InnerJob.Streams.Error -OR $CaughtErrors) {
+                    #$PoshRS_jobCleanup.Host.UI.WriteVerboseLine("$($Job.Id) Errors Found!")
                     $ErrorList = New-Object System.Management.Automation.PSDataCollection[System.Management.Automation.ErrorRecord]
-                    ForEach ($Err in $job.InnerJob.Streams.Error) {
-                        [void]$ErrorList.Add($Err)
+                    If ($job.InnerJob.Streams.Error) {
+                        ForEach ($Err in $job.InnerJob.Streams.Error) {
+                            #$PoshRS_jobCleanup.Host.UI.WriteVerboseLine("`t$($Job.Id) Adding Error")             
+                            [void]$ErrorList.Add($Err)
+                        }
+                    }
+                    If ($CaughtErrors) {
+                        ForEach ($Err in $CaughtErrors) {
+                            #$PoshRS_jobCleanup.Host.UI.WriteVerboseLine("`t$($Job.Id) Adding Error")             
+                            [void]$ErrorList.Add($Err)
+                        }                    
                     }
                     $job.Error = $ErrorList
                 }
-                $job.InnerJob.dispose()   
-                If ((Get-Variable data).Value) {
-                    $job.output = $data
-                    $job.HasMoreData = $True
-                    Remove-Variable data
-                }                            
+                #$PoshRS_jobCleanup.Host.UI.WriteVerboseLine("$($Job.Id) Disposing job")
+                $job.InnerJob.dispose() 
+                $job.Completed = $True  
+                #Return type from Invoke() is a generic collection; need to verify the first index is not NULL
+                If (($Data.Count -gt 0) -AND (-NOT ($Null -eq $Data[0]))) {   
+                    $job.output = $Data
+                    $job.HasMoreData = $True                            
+                }              
+                $Error.Clear()
             } 
         }        
-        [System.Threading.Monitor]::Exit($Jobs.syncroot)
+        [System.Threading.Monitor]::Exit($PoshRS_Jobs.syncroot)
         Start-Sleep -Milliseconds 100     
-    } while ($jobCleanup.Flag)
+    } while ($PoshRS_jobCleanup.Flag)
 })
-$jobCleanup.PowerShell.Runspace = $jobcleanup.Runspace
-$jobCleanup.Handle = $jobCleanup.PowerShell.BeginInvoke()  
+$PoshRS_jobCleanup.PowerShell.Runspace = $PoshRS_jobCleanup.Runspace
+$PoshRS_jobCleanup.Handle = $PoshRS_jobCleanup.PowerShell.BeginInvoke()  
 
 Write-Verbose "Creating routine to monitor Runspace Pools"
-$RunspacePoolCleanup.Flag=$True
-$RunspacePoolCleanup.Host=$Host
+$PoshRS_RunspacePoolCleanup.Flag=$True
+$PoshRS_RunspacePoolCleanup.Host=$Host
 #5 minute timeout for unused runspace pools
-$RunspacePoolCleanup.Timeout = [timespan]::FromMinutes(1).Ticks
-$RunspacePoolCleanup.Runspace =[runspacefactory]::CreateRunspace()
+$PoshRS_RunspacePoolCleanup.Timeout = [timespan]::FromMinutes(1).Ticks
+$PoshRS_RunspacePoolCleanup.Runspace =[runspacefactory]::CreateRunspace()
  
 #Create Type Collection so the object will work properly 
 $Types = Get-ChildItem "$($PSScriptRoot)\TypeData" -Filter *Types* | Select -ExpandProperty Fullname 
 $Types | ForEach { 
     $TypeEntry = New-Object System.Management.Automation.Runspaces.TypeConfigurationEntry -ArgumentList $_ 
-    $RunspacePoolCleanup.Runspace.RunspaceConfiguration.types.Append($TypeEntry) 
+    $PoshRS_RunspacePoolCleanup.Runspace.RunspaceConfiguration.types.Append($TypeEntry) 
 } 
   
-$RunspacePoolCleanup.Runspace.Open()         
-$RunspacePoolCleanup.Runspace.SessionStateProxy.SetVariable("RunspacePoolCleanup",$RunspacePoolCleanup)     
-$RunspacePoolCleanup.Runspace.SessionStateProxy.SetVariable("RunspacePools",$RunspacePools) 
-$RunspacePoolCleanup.Runspace.SessionStateProxy.SetVariable("ParentHost",$Host) 
-$RunspacePoolCleanup.PowerShell = [PowerShell]::Create().AddScript({
+$PoshRS_RunspacePoolCleanup.Runspace.Open()         
+$PoshRS_RunspacePoolCleanup.Runspace.SessionStateProxy.SetVariable("PoshRS_RunspacePoolCleanup",$PoshRS_RunspacePoolCleanup)     
+$PoshRS_RunspacePoolCleanup.Runspace.SessionStateProxy.SetVariable("PoshRS_RunspacePools",$PoshRS_RunspacePools) 
+$PoshRS_RunspacePoolCleanup.Runspace.SessionStateProxy.SetVariable("ParentHost",$Host) 
+$PoshRS_RunspacePoolCleanup.PowerShell = [PowerShell]::Create().AddScript({
     #Routine to handle completed runspaces
     Do { 
-        $DisposeRunspacePools=$False  
-        If ($RunspacePools.Count -gt 0) { 
-            #$ParentHost.ui.WriteVerboseLine("$($RunspacePools | Out-String)")           
-            [System.Threading.Monitor]::Enter($RunspacePools.syncroot) 
-            Foreach($RunspacePool in $RunspacePools) {                
+        $DisposePoshRS_RunspacePools=$False  
+        If ($PoshRS_RunspacePools.Count -gt 0) { 
+            #$ParentHost.ui.WriteVerboseLine("$($PoshRS_RunspacePools | Out-String)")           
+            [System.Threading.Monitor]::Enter($PoshRS_RunspacePools.syncroot) 
+            Foreach($RunspacePool in $PoshRS_RunspacePools) {                
                 #$ParentHost.ui.WriteVerboseLine("RunspacePool <$($RunspacePool.RunspaceID)> | MaxJobs: $($RunspacePool.MaxJobs) | AvailJobs: $($RunspacePool.AvailableJobs)")
-                If (($RunspacePool.AvailableJobs -eq $RunspacePool.MaxJobs) -AND $RunspacePools.LastActivity.Ticks -ne 0) {
-                    If ((Get-Date).Ticks - $RunspacePool.LastActivity.Ticks -gt $RunspacePoolCleanup.Timeout) {
+                If (($RunspacePool.AvailableJobs -eq $RunspacePool.MaxJobs) -AND $PoshRS_RunspacePools.LastActivity.Ticks -ne 0) {
+                    If ((Get-Date).Ticks - $RunspacePool.LastActivity.Ticks -gt $PoshRS_RunspacePoolCleanup.Timeout) {
                         #Dispose of runspace pool
                         $RunspacePool.RunspacePool.Close()
                         $RunspacePool.RunspacePool.Dispose()
                         $RunspacePool.CanDispose = $True
-                        $DisposeRunspacePools=$True
+                        $DisposePoshRS_RunspacePools=$True
                     }
                 } Else {
                     $RunspacePool.LastActivity = (Get-Date)
                 }               
             }       
             #Remove runspace pools
-            If ($DisposeRunspacePools) {
-                $TempCollection = $RunspacePools.Clone()
+            If ($DisposePoshRS_RunspacePools) {
+                $TempCollection = $PoshRS_RunspacePools.Clone()
                 $TempCollection | Where {
                     $_.CanDispose
                 } | ForEach {
                     #$ParentHost.ui.WriteVerboseLine("Removing runspacepool <$($_.RunspaceID)>")
-                    [void]$RunspacePools.Remove($_)
+                    [void]$PoshRS_RunspacePools.Remove($_)
                 }
             }
             Remove-Variable TempCollection
-            [System.Threading.Monitor]::Exit($RunspacePools.syncroot)
+            [System.Threading.Monitor]::Exit($PoshRS_RunspacePools.syncroot)
         }
         Start-Sleep -Milliseconds 5000     
-    } while ($RunspacePoolCleanup.Flag)
+    } while ($PoshRS_RunspacePoolCleanup.Flag)
 })
-$RunspacePoolCleanup.PowerShell.Runspace = $RunspacePoolCleanup.Runspace
-$RunspacePoolCleanup.Handle = $RunspacePoolCleanup.PowerShell.BeginInvoke() 
+$PoshRS_RunspacePoolCleanup.PowerShell.Runspace = $PoshRS_RunspacePoolCleanup.Runspace
+$PoshRS_RunspacePoolCleanup.Handle = $PoshRS_RunspacePoolCleanup.PowerShell.BeginInvoke() 
 #endregion Cleanup Routine
 
-#region Load Functions
+#region Load Public Functions
 Try {
-    Get-ChildItem "$ScriptPath\Scripts" -Filter *.ps1 | Select -Expand FullName | ForEach {
+    Get-ChildItem "$ScriptPath\Public" -Filter *.ps1 | Select -Expand FullName | ForEach {
         $Function = Split-Path $_ -Leaf
         . $_
     }
@@ -163,264 +139,57 @@ Try {
     Write-Warning ("{0}: {1}" -f $Function,$_.Exception.Message)
     Continue
 }
-#endregion Load Functions
+#endregion Load Public Functions
+
+#region Load Private Functions
+Try {
+    Get-ChildItem "$ScriptPath\Private" -Filter *.ps1 | Select -Expand FullName | ForEach {
+        $Function = Split-Path $_ -Leaf
+        . $_
+    }
+} Catch {
+    Write-Warning ("{0}: {1}" -f $Function,$_.Exception.Message)
+    Continue
+}
+#endregion Load Private Functions
 
 #region Format and Type Data
 Update-FormatData "$ScriptPath\TypeData\PoshRSJob.Format.ps1xml"
 Update-TypeData "$ScriptPath\TypeData\PoshRSJob.Types.ps1xml"
 #endregion Format and Type Data
 
-#region Private Functions
-Function Increment {
-    Set-Variable -Name JobId -Value ($JobId + 1) -Force -Scope Global
-    Write-Output $JobId
-}
-
-Function GetUsingVariables {
-    Param ([scriptblock]$ScriptBlock)
-    $ScriptBlock.ast.FindAll({$args[0] -is [System.Management.Automation.Language.UsingExpressionAst]},$True)    
-}
-
-Function GetUsingVariableValues {
-    Param ([System.Management.Automation.Language.UsingExpressionAst[]]$UsingVar)
-    $UsingVar = $UsingVar | Group SubExpression | ForEach {$_.Group | Select -First 1}
-    ForEach ($Var in $UsingVar) {
-        Try {
-            $Value = Get-Variable -Name $Var.SubExpression.VariablePath.UserPath -ErrorAction Stop
-            [pscustomobject]@{
-                Name = $Var.SubExpression.Extent.Text
-                Value = $Value.Value
-                NewName = ('$__using_{0}' -f $Var.SubExpression.VariablePath.UserPath)
-                NewVarName = ('__using_{0}' -f $Var.SubExpression.VariablePath.UserPath)
-            }
-        } Catch {
-            Throw "$($Var.SubExpression.Extent.Text) is not a valid Using: variable!"
-        }
-    }
-}
-
-Function ConvertScript {
-    Param (
-        [scriptblock]$ScriptBlock
-    )
-    $UsingVariables = GetUsingVariables -ScriptBlock $ScriptBlock
-    $List = New-Object 'System.Collections.Generic.List`1[System.Management.Automation.Language.VariableExpressionAst]'
-    $Params = New-Object System.Collections.ArrayList
-    If ($Script:Add_) {
-        [void]$Params.Add('$_')
-    }
-    If ($UsingVariables) {        
-        ForEach ($Ast in $UsingVariables) {
-            [void]$list.Add($Ast.SubExpression)
-        }
-        $UsingVariableData = GetUsingVariableValues $UsingVariables
-        [void]$Params.AddRange(($UsingVariableData.NewName | Select -Unique))
-    } 
-    $NewParams = $Params -join ', '
-    $Tuple=[Tuple]::Create($list,$NewParams)
-    $bindingFlags = [Reflection.BindingFlags]"Default,NonPublic,Instance"
-
-    $GetWithInputHandlingForInvokeCommandImpl = ($ScriptBlock.ast.gettype().GetMethod('GetWithInputHandlingForInvokeCommandImpl',$bindingFlags))
-    $StringScriptBlock = $GetWithInputHandlingForInvokeCommandImpl.Invoke($ScriptBlock.ast,@($Tuple))
-    If ([scriptblock]::Create($StringScriptBlock).ast.endblock[0].statements.extent.text.startswith('$input |')) {
-        $StringScriptBlock = $StringScriptBlock -replace '\$Input \|'
-    }
-    If (-NOT $ScriptBlock.Ast.ParamBlock) {
-        $StringScriptBlock = "Param($($NewParams))`n$($StringScriptBlock)"
-        [scriptblock]::Create($StringScriptBlock)
-    } Else {
-        [scriptblock]::Create($StringScriptBlock)
-    }
-}
-
-Function IsExistingParamBlock {
-    Param([scriptblock]$ScriptBlock)
-    $errors = [System.Management.Automation.PSParseError[]] @()
-    $Tokens = [Management.Automation.PsParser]::Tokenize($ScriptBlock.tostring(), [ref] $errors)       
-    $Finding=$True
-    For ($i=0;$i -lt $Tokens.count; $i++) {       
-        If ($Tokens[$i].Content -eq 'Param' -AND $Tokens[$i].Type -eq 'Keyword') {
-            $HasParam = $True
-            BREAK
-        }
-    }
-    If ($HasParam) {
-        $True
-    } Else {
-        $False
-    }
-}
-
-Function GetUsingVariablesV2 {
-    Param ([scriptblock]$ScriptBlock)
-    $errors = [System.Management.Automation.PSParseError[]] @()
-    $Results = [Management.Automation.PsParser]::Tokenize($ScriptBlock.tostring(), [ref] $errors)
-    $Results | Where {
-        $_.Content -match '^Using:' -AND $_.Type -eq 'Variable'
-    }
-}
-
-Function GetUsingVariableValuesV2 {
-    Param ([System.Management.Automation.PSToken[]]$UsingVar)
-    $UsingVar | ForEach {
-        $Name = $_.Content -replace 'Using:'
-        New-Object PoshRS.PowerShell.V2UsingVariable -Property @{
-            Name = $Name
-            NewName = '$__using_{0}' -f $Name
-            Value = (Get-Variable -Name $Name).Value
-            NewVarName = ('__using_{0}') -f $Name
-        }
-    }
-}
-
-Function ConvertScriptBlockV2 {
-    Param ([scriptblock]$ScriptBlock)
-    $UsingVariables = GetUsingVariablesV2 -ScriptBlock $ScriptBlock
-    $UsingVariable = GetUsingVariableValuesV2 -UsingVar $UsingVariables
-    $errors = [System.Management.Automation.PSParseError[]] @()
-    $Tokens = [Management.Automation.PsParser]::Tokenize($ScriptBlock.tostring(), [ref] $errors)
-    $StringBuilder = New-Object System.Text.StringBuilder
-    $UsingHash = @{}
-    $UsingVariable | ForEach {
-        $UsingHash["Using:$($_.Name)"] = $_.NewVarName
-    }
-    $HasParam = IsExistingParamBlock -ScriptBlock $ScriptBlock
-    $Params = New-Object System.Collections.ArrayList
-    If ($Script:Add_) {
-        [void]$Params.Add('$_')
-    }
-    If ($UsingVariable) {        
-        [void]$Params.AddRange(($UsingVariable | Select -expand NewName))
-    } 
-    $NewParams = $Params -join ', '  
-    If (-Not $HasParam) {
-        [void]$StringBuilder.Append("Param($($NewParams))")
-    }
-    For ($i=0;$i -lt $Tokens.count; $i++){
-        #Write-Verbose "Type: $($Tokens[$i].Type)"
-        #Write-Verbose "Previous Line: $($Previous.StartLine) -- Current Line: $($Tokens[$i].StartLine)"
-        If ($Previous.StartLine -eq $Tokens[$i].StartLine) {
-            $Space = " " * [int]($Tokens[$i].StartColumn - $Previous.EndColumn)
-            [void]$StringBuilder.Append($Space)
-        }
-        Switch ($Tokens[$i].Type) {
-            'NewLine' {[void]$StringBuilder.Append("`n")}
-            'Variable' {
-                If ($UsingHash[$Tokens[$i].Content]) {
-                    [void]$StringBuilder.Append(("`${0}" -f $UsingHash[$Tokens[$i].Content]))
-                } Else {
-                    [void]$StringBuilder.Append(("`${0}" -f $Tokens[$i].Content))
-                }
-            }
-            'String' {
-                [void]$StringBuilder.Append(("`"{0}`"" -f $Tokens[$i].Content))
-            }
-            'GroupStart' {
-                $Script:GroupStart++
-                If ($Script:AddUsing -AND $Script:GroupStart -eq 1) {
-                    $Script:AddUsing = $False
-                    [void]$StringBuilder.Append($Tokens[$i].Content)                    
-                    If ($HasParam) {
-                        [void]$StringBuilder.Append("$($NewParams),")
-                    }
-                } Else {
-                    [void]$StringBuilder.Append($Tokens[$i].Content)
-                }
-            }
-            'GroupEnd' {
-                $Script:GroupStart--
-                If ($Script:GroupStart -eq 0) {
-                    $Script:Param = $False
-                    [void]$StringBuilder.Append($Tokens[$i].Content)
-                } Else {
-                    [void]$StringBuilder.Append($Tokens[$i].Content)
-                }
-            }
-            'KeyWord' {
-                If ($Tokens[$i].Content -eq 'Param') {
-                    $Script:Param = $True
-                    $Script:AddUsing = $True
-                    $Script:GroupStart=0
-                    [void]$StringBuilder.Append($Tokens[$i].Content)
-                } Else {
-                    [void]$StringBuilder.Append($Tokens[$i].Content)
-                }                
-            }
-            Default {
-                [void]$StringBuilder.Append($Tokens[$i].Content)         
-            }
-        } 
-        $Previous = $Tokens[$i]   
-    }
-    #$StringBuilder.ToString()
-    [scriptblock]::Create($StringBuilder.ToString())
-}
-
-Function GetParamVariable {
-    [CmdletBinding()]
-    param (
-        [scriptblock]$ScriptBlock
-    )     
-    # Tokenize the script
-    $tokens = [Management.Automation.PSParser]::Tokenize($ScriptBlock, [ref]$null) | Where {
-        $_.Type -ne 'NewLine'
-    }
-
-    # First Pass - Grab all tokens between the first param block.
-    $paramsearch = $false
-    $groupstart = 0
-    $groupend = 0
-    for ($i = 0; $i -lt $tokens.Count; $i++) {
-        if (!$paramsearch) {
-            if ($tokens[$i].Content -eq "param" ) {
-                $paramsearch = $true
-            }
-        }
-        if ($paramsearch) {
-            if (($tokens[$i].Type -eq "GroupStart") -and ($tokens[$i].Content -eq '(') ) {
-                $groupstart++
-            }
-            if (($tokens[$i].Type -eq "GroupEnd") -and ($tokens[$i].Content -eq ')') ) {
-                $groupend++
-            }
-            if (($groupstart -ge 1) -and ($groupstart -eq $groupend)) {
-                $paramsearch = $false
-            }
-            if (($tokens[$i].Type -eq 'Variable') -and ($tokens[($i-1)].Content -ne '=')) {
-                if ((($groupstart - $groupend) -eq 1)) {
-                    "$($tokens[$i].Content)"
-                }
-            }
-        }
-    }
-}
-#endregion Private Functions
-
 #region Aliases
-New-Alias -Name ssj -Value Start-RSJob
-New-Alias -Name gsj -Value Get-RSJob
-New-Alias -Name rsj -Value Receive-RSJob
-New-Alias -Name rmsj -Value Remove-RSJob
-New-Alias -Name spsj -Value Stop-RSJob
-New-Alias -Name wsj -Value Wait-RSJob
+New-Alias -Name ssj -Value Start-RSJob -Force
+New-Alias -Name gsj -Value Get-RSJob -Force
+New-Alias -Name rsj -Value Receive-RSJob -Force
+New-Alias -Name rmsj -Value Remove-RSJob -Force
+New-Alias -Name spsj -Value Stop-RSJob -Force
+New-Alias -Name wsj -Value Wait-RSJob -Force
 #endregion Aliases
 
 #region Handle Module Removal
 $ExecutionContext.SessionState.Module.OnRemove ={
-    $jobCleanup.Flag=$False
-    $RunspacePoolCleanup.Flag=$False
+    $PoshRS_jobCleanup.Flag=$False
+    $PoshRS_RunspacePoolCleanup.Flag=$False
     #Let sit for a second to make sure it has had time to stop
     Start-Sleep -Seconds 1
-    $jobCleanup.PowerShell.EndInvoke($jobCleanup.Handle)
-    $jobCleanup.PowerShell.Dispose()    
-    $RunspacePoolCleanup.PowerShell.EndInvoke($RunspacePoolCleanup.Handle)
-    $RunspacePoolCleanup.PowerShell.Dispose()
-    Remove-Variable JobId -Scope Global -Force
-    Remove-Variable Jobs -Scope Global -Force
-    Remove-Variable JobCleanup -Scope Global -Force
-    Remove-Variable RunspacePoolCleanup -Scope Global -Force
-    Remove-Variable RunspacePools -Scope Global -Force
+    $PoshRS_jobCleanup.PowerShell.EndInvoke($PoshRS_jobCleanup.Handle)
+    $PoshRS_jobCleanup.PowerShell.Dispose()    
+    $PoshRS_RunspacePoolCleanup.PowerShell.EndInvoke($PoshRS_RunspacePoolCleanup.Handle)
+    $PoshRS_RunspacePoolCleanup.PowerShell.Dispose()
+    Remove-Variable PoshRS_JobId -Scope Script -Force
+    Remove-Variable PoshRS_Jobs -Scope Script -Force
+    Remove-Variable PoshRS_jobCleanup -Scope Script -Force
+    Remove-Variable PoshRS_RunspacePoolCleanup -Scope Script -Force
+    Remove-Variable PoshRS_RunspacePools -Scope Script -Force
 }
 #endregion Handle Module Removal
 
-Export-ModuleMember -Alias * -Function '*-RSJob'
+#region Export Module Members
+$ExportModule = @{
+    Alias = @('gsj','rmsj','rsj','spsj','ssj','wsj')
+    Function = @('Get-RSJob','Receive-RSJob','Remove-RSJob','Start-RSJob','Stop-RSJob','Wait-RSJob')
+    Variable = @('PoshRS_JobId','PoshRS_Jobs','PoshRS_jobCleanup','PoshRS_RunspacePoolCleanup','PoshRS_RunspacePools')
+}
+Export-ModuleMember @ExportModule
+#endregion Export Module Members

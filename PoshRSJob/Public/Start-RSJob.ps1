@@ -24,6 +24,9 @@ Function Start-RSJob {
         .PARAMETER Name
             The name of a background runspace job
 
+        .PARAMETER Batch
+            Name of the batch of RSJobs that will be run
+
         .PARAMETER ArgumentList
             List of values that will be applied at the end of the argument list in the Param() statement.
 
@@ -157,7 +160,7 @@ Function Start-RSJob {
         DefaultParameterSetName = 'ScriptBlock'
     )]
     Param (
-        [parameter(Position=0,ParameterSetName = 'ScriptBlock')]
+        [parameter(Mandatory=$True,Position=0,ParameterSetName = 'ScriptBlock')]
         [ScriptBlock]$ScriptBlock,
         [parameter(Position=0,ParameterSetName = 'ScriptPath')]
         [string]$FilePath,
@@ -166,7 +169,9 @@ Function Start-RSJob {
         [parameter()]
         [object]$Name,
         [parameter()]
-        [object]$ArgumentList,
+        [string]$Batch,
+        [parameter()]
+        $ArgumentList,
         [parameter()]
         [int]$Throttle = 5,
         [parameter()]
@@ -180,6 +185,13 @@ Function Start-RSJob {
         If ($PSBoundParameters['Debug']) {
             $DebugPreference = 'Continue'
         } 
+        If ($PSBoundParameters.ContainsKey('Verbose')) {
+            Write-Verbose "Displaying PSBoundParameters"
+            $PSBoundParameters.GetEnumerator() | ForEach {
+                Write-Verbose $_
+            }
+        }
+
         If ($PSBoundParameters.ContainsKey('Name')) {
             If ($Name -isnot [scriptblock]) {
                 $JobName = [scriptblock]::Create("Write-Output $Name")
@@ -197,12 +209,17 @@ Function Start-RSJob {
             [void]$InitialSessionState.ImportPSModule($ModulesToImport)
         }
         If ($PSBoundParameters['PSSnapinsToImport']) {
-            [void]$InitialSessionState.ImportPSSnapIn($PSSnapinsToImport,[ref]$Null)
+            ForEach ($PSSnapin in $PSSnapinsToImport) {
+                [void]$InitialSessionState.ImportPSSnapIn($PSSnapin,[ref]$Null)
+            }
         }
         If ($PSBoundParameters['FunctionsToLoad']) {
+            Write-Verbose "Loading custom functions: $($FunctionsToLoad -join '; ')"
             ForEach ($Function in $FunctionsToLoad) {
                 Try {
+                    RegisterScriptScopeFunction -Name $Function
                     $Definition = Get-Content Function:\$Function -ErrorAction Stop
+                    Write-Debug "Definition: $($Definition)"
                     $SessionStateFunction = New-Object System.Management.Automation.Runspaces.SessionStateFunctionEntry -ArgumentList $Function, $Definition
                     $InitialSessionState.Commands.Add($SessionStateFunction) 
                 } Catch {
@@ -210,7 +227,19 @@ Function Start-RSJob {
                 }
             }           
         }
+        If ($PSBoundParameters.ContainsKey('ArgumentList')) {
+            If (@($ArgumentList).count -match '0|1') {
+                $SingleArgument = $True
+            } Else {
+                $SingleArgument = $False
+            }
+        }
         $RunspacePool = [runspacefactory]::CreateRunspacePool($InitialSessionState)
+        Try {
+            #ApartmentState doesn't exist in Nano Server
+            $RunspacePool.ApartmentState = 'STA'
+        } 
+        Catch {}
         [void]$RunspacePool.SetMaxRunspaces($Throttle)
         If ($PSVersionTable.PSVersion.Major -gt 2) {
             $RunspacePool.CleanupInterval = [timespan]::FromMinutes(2)    
@@ -241,27 +270,62 @@ Function Start-RSJob {
     }
     End {  
         $SBParamCount = @(GetParamVariable -ScriptBlock $ScriptBlock).Count
-        If ($PSBoundParameters.ContainsKey('InputObject')) {
-            $SBParamCount++
+        $ArgumentCount = If ($ArgumentList.count -eq $Null) {
+            0
+        } Else {
+            $ArgumentList.count
         }
-        If ($ArgumentList.Count -ne $SBParamCount) {
+        If ($PSBoundParameters.ContainsKey('InputObject')) {
+            If ($ArgumentCount -gt 0) {
+                $SBParamCount++
+            } Else {
+                $SBParamCount--
+            }
+        }
+        If ($ArgumentCount -ne $SBParamCount -AND $IsPipeline) {
             Write-Verbose 'Will use $_ in Param() Block'
             $Script:Add_ = $True
         } Else {
             $Script:Add_ = $False
         }
-        #Convert ScriptBlock for $Using:
+        #region Convert ScriptBlock for $Using:
+        $PreviousErrorAction = $ErrorActionPreference
+        $ErrorActionPreference = 'Stop'
+        Write-Verbose "PowerShell Version: $($PSVersionTable.PSVersion.Major)"
         Switch ($PSVersionTable.PSVersion.Major) {
             2 {
-                Write-Debug "Using PSParser with PowerShell V2"
-                $UsingVariables = @(GetUsingVariablesV2 -ScriptBlock $ScriptBlock)
-                
+                Write-Verbose "Using PSParser with PowerShell V2"
+                $UsingVariables = @(GetUsingVariablesV2 -ScriptBlock $ScriptBlock)                
+                Write-Verbose "Using Count: $($UsingVariables.count)"
+                Write-Verbose "$($UsingVariables|Out-String)"
+                Write-Verbose "CommandOrigin: $($MyInvocation.CommandOrigin)"
                 If ($UsingVariables.count -gt 0) {
-                    $UsingVariableValues = @(GetUsingVariableValuesV2 -UsingVar $UsingVariables)
+                    $UsingVariableValues = @($UsingVariables | ForEach {
+                        $Name = $_.Content -replace 'Using:'
+                        Try {
+                            If ($MyInvocation.CommandOrigin -eq 'Runspace') {
+                                $Value = (Get-Variable -Name $Name).Value
+                            } Else {
+                                $Value = $PSCmdlet.SessionState.PSVariable.Get($Name).Value
+                                If ([string]::IsNullOrEmpty($Value)) {
+                                    Throw 'No value!'
+                                }
+                            }
+                            New-Object PoshRS.PowerShell.V2UsingVariable -Property @{
+                                Name = $Name
+                                NewName = '$__using_{0}' -f $Name
+                                Value = $Value
+                                NewVarName = ('__using_{0}') -f $Name
+                            }
+                        } Catch {
+                            Throw "Start-RSJob : The value of the using variable '$($Var.SubExpression.Extent.Text)' cannot be retrieved because it has not been set in the local session."                        
+                        }
+                    })
+
                     Write-Verbose ("Found {0} `$Using: variables!" -f $UsingVariableValues.count)
                 }
                 If ($UsingVariables.count -gt 0 -OR $Script:Add_) {
-                    $NewScriptBlock = ConvertScriptBlockV2 $ScriptBlock            
+                    $NewScriptBlock = ConvertScriptBlockV2 $ScriptBlock -UsingVariable $UsingVariables -UsingVariableValue $UsingVariableValues           
                 } Else {
                     $NewScriptBlock = $ScriptBlock
                 }                
@@ -270,9 +334,32 @@ Function Start-RSJob {
                 Write-Debug "Using AST with PowerShell V3+"
                 $UsingVariables = @(GetUsingVariables $ScriptBlock | Group SubExpression | ForEach {
                     $_.Group | Select -First 1
-                })
+                })    
+                #region Get Variable Values            
                 If ($UsingVariables.count -gt 0) {
-                    $UsingVariableValues = @(GetUsingVariableValues -UsingVar $UsingVariables)
+                    $UsingVar = $UsingVariables | Group SubExpression | ForEach {$_.Group | Select -First 1}  
+                    Write-Debug "CommandOrigin: $($MyInvocation.CommandOrigin)"      
+                    $UsingVariableValues = @(ForEach ($Var in $UsingVar) {
+                        Try {
+                            If ($MyInvocation.CommandOrigin -eq 'Runspace') {
+                                $Value = Get-Variable -Name $Var.SubExpression.VariablePath.UserPath
+                            } Else {
+                                $Value = ($PSCmdlet.SessionState.PSVariable.Get($Var.SubExpression.VariablePath.UserPath))
+                                If ([string]::IsNullOrEmpty($Value)) {
+                                    Throw 'No value!'
+                                }
+                            }
+                            [pscustomobject]@{
+                                Name = $Var.SubExpression.Extent.Text
+                                Value = $Value.Value
+                                NewName = ('$__using_{0}' -f $Var.SubExpression.VariablePath.UserPath)
+                                NewVarName = ('__using_{0}' -f $Var.SubExpression.VariablePath.UserPath)
+                            }
+                        } Catch {
+                            Throw "Start-RSJob : The value of the using variable '$($Var.SubExpression.Extent.Text)' cannot be retrieved because it has not been set in the local session."
+                        }
+                    })
+                    #endregion Get Variable Values
                     Write-Verbose ("Found {0} `$Using: variables!" -f $UsingVariableValues.count)
                 }
                 If ($UsingVariables.count -gt 0 -OR $Script:Add_) {
@@ -282,33 +369,46 @@ Function Start-RSJob {
                 }
             }
         }
+        $ErrorActionPreference = $PreviousErrorAction
+        #endregion Convert ScriptBlock for $Using:
 
         Write-Debug "ScriptBlock: $($NewScriptBlock)"
-        [System.Threading.Monitor]::Enter($RunspacePools.syncroot) 
-        [void]$RunspacePools.Add($RSPObject)
-        [System.Threading.Monitor]::Exit($RunspacePools.syncroot) 
+        [System.Threading.Monitor]::Enter($PoshRS_RunspacePools.syncroot) 
+        [void]$PoshRS_RunspacePools.Add($RSPObject)
+        [System.Threading.Monitor]::Exit($PoshRS_RunspacePools.syncroot) 
 
         If ($List.Count -gt 0) {
             Write-Debug "InputObject"
             ForEach ($Item in $list) {
                 $ID = Increment                    
-                Write-Verbose "Using $($Item) as pipline variable"
+                Write-Verbose "Using $($Item) as pipeline variable"
                 $PowerShell = [powershell]::Create().AddScript($NewScriptBlock)
                 $PowerShell.RunspacePool = $RunspacePool
                 [void]$PowerShell.AddArgument($Item)
+                Write-Verbose "Checking for Using: variables"
                 If ($UsingVariableValues.count -gt 0) {
                     For ($i=0;$i -lt $UsingVariableValues.count;$i++) {
                         Write-Verbose "Adding Param: $($UsingVariableValues[$i].Name) Value: $($UsingVariableValues[$i].Value)"
                         [void]$PowerShell.AddParameter($UsingVariableValues[$i].NewVarName,$UsingVariableValues[$i].Value)
                     }
                 }
+                Write-Verbose "Checking for ArgumentList"
                 If ($PSBoundParameters.ContainsKey('ArgumentList')) {
-                    ForEach ($Argument in $ArgumentList) {
-                        Write-Verbose "Adding Argument: $($Argument)"
-                        [void]$PowerShell.AddArgument($Argument)    
+                    If ($SingleArgument) {                        
+                        ,$ArgumentList | ForEach {
+                            Write-Verbose "Adding Argument: $($_) <$($_.GetType().Fullname)>"
+                            [void]$PowerShell.AddArgument($_) 
+                        }
+                    } Else {
+                        ForEach ($Argument in $ArgumentList) {
+                            Write-Verbose "Adding Argument: $($Argument) <$($Argument.GetType().Fullname)>"
+                            [void]$PowerShell.AddArgument($Argument)    
+                        }
                     }
                 }
+                Write-Verbose "Invoking Runspace"
                 $Handle = $PowerShell.BeginInvoke()
+                Write-Verbose "Determining Job Name"
                 $_JobName = If ($PSVersionTable.PSVersion.Major -eq 2) {
                     $JobName.Invoke()
                 } Else {
@@ -324,13 +424,16 @@ Function Start-RSJob {
                     Finished = $handle.IsCompleted
                     Command  = $ScriptBlock.ToString()
                     RunspacePoolID = $RunSpacePoolID
+                    Batch = $Batch
                     State = [System.Management.Automation.PSInvocationState]::Running
                 }
                 
                 $RSPObject.LastActivity = Get-Date
-                [System.Threading.Monitor]::Enter($Jobs.syncroot) 
-                [void]$Jobs.Add($Object)
-                [System.Threading.Monitor]::Exit($Jobs.syncroot) 
+                Write-Verbose "Adding RSJob to Jobs queue"
+                [System.Threading.Monitor]::Enter($PoshRS_Jobs.syncroot) 
+                [void]$PoshRS_Jobs.Add($Object)
+                [System.Threading.Monitor]::Exit($PoshRS_Jobs.syncroot) 
+                Write-Verbose "Display RSJob"
                 $Object            
             }
         } Else {
@@ -345,9 +448,16 @@ Function Start-RSJob {
                 }
             }
             If ($PSBoundParameters.ContainsKey('ArgumentList')) {
-                ForEach ($Argument in $ArgumentList) {
-                    Write-Verbose "Adding Argument: $($Argument)"
-                    [void]$PowerShell.AddArgument($Argument)    
+                If ($SingleArgument) {
+                    ,$ArgumentList | ForEach {
+                        Write-Verbose "Adding Argument: $($_) <$($_.GetType().Fullname)>"
+                        [void]$PowerShell.AddArgument($_) 
+                    }
+                } Else {
+                    ForEach ($Argument in $ArgumentList) {
+                        Write-Verbose "Adding Argument: $($Argument) <$($Argument.GetType().Fullname)>"
+                        [void]$PowerShell.AddArgument($Argument)    
+                    }
                 }
             }
             $Handle = $PowerShell.BeginInvoke()
@@ -366,12 +476,14 @@ Function Start-RSJob {
                 Finished = $handle.RSWaitHandle
                 Command  = $ScriptBlock.ToString()
                 RunspacePoolID = $RunSpacePoolID
+                Batch = $Batch
+                State = [System.Management.Automation.PSInvocationState]::Running
             }
             
             $RSPObject.LastActivity = Get-Date
-            [System.Threading.Monitor]::Enter($Jobs.syncroot) 
-            [void]$Jobs.Add($Object)
-            [System.Threading.Monitor]::Exit($Jobs.syncroot) 
+            [System.Threading.Monitor]::Enter($PoshRS_Jobs.syncroot) 
+            [void]$PoshRS_Jobs.Add($Object)
+            [System.Threading.Monitor]::Exit($PoshRS_Jobs.syncroot) 
             $Object        
         }      
     }

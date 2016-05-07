@@ -1,17 +1,24 @@
-Function Wait-RSJob {
+Function Get-RSJob {
     <#
         .SYNOPSIS
-            Waits until all RSJobs are in one of the following states: 
+            Gets runspace jobs that are currently available in the session.
+
         .DESCRIPTION
-            Waits until all RSJobs are in one of the following states:
+            Get-RSJob will display all jobs that are currently available to include completed and currently running jobs.
+            If no parameters are given, all jobs are displayed to view.
+
         .PARAMETER Name
             The name of the jobs to query for.
+
         .PARAMETER ID
-            The ID of the jobs that you want to wait for.
+            The ID of the jobs that you want to display.
+
         .PARAMETER InstanceID
-            The GUID of the jobs that you want to wait for.
+            The GUID of the jobs that you want to display.
+
         .PARAMETER State
-            The State of the job that you want to wait for. Accepted values are:
+            The State of the job that you want to display. Accepted values are:
+
             NotStarted
             Running
             Completed
@@ -19,27 +26,43 @@ Function Wait-RSJob {
             Stopping
             Stopped
             Disconnected
+
+        .PARAMETER Batch 
+            Name of the set of jobs
+
         .PARAMETER HasMoreData
-            Waits for jobs that have data being outputted. You can specify -HasMoreData:$False to wait for jobs
-            that have no data to output.
-		.PARAMETER Timeout
-			Timeout after specified number of seconds
+            Displays jobs that have data being outputted. You can specify -HasMoreData:$False to display jobs
+            that have no data to output.            
+
         .NOTES
-            Name: Wait-RSJob
-            Author: Ryan Bushe/
-			Notes: This function is a slightly modified version of Get-RSJob by Boe Prox.(~10 lines of code changed)
+            Name: Get-RSJob
+            Author: Boe Prox                
+
         .EXAMPLE
-            Get-RSJob | Wait-RSJob
+            Get-RSJob -State Completed
+
             Description
             -----------
-            Waits for jobs which have to be completed.
+            Displays a list of jobs which have completed.
+
+        .EXAMPLE
+            Get-RSJob -ID 1,5,78
+
+            Id  Name                 State           HasMoreData  HasErrors    Command
+            --  ----                 -----           -----------  ---------    -------
+            1   Test_1               Completed       True         False        ...
+            5   Test_5               Completed       True         False        ...
+            78  Test_78              Completed       True         False        ...
+
+            Description
+            -----------
+            Displays list of jobs with IDs 1,5,78.
     #>
+    [OutputType('PoshRS.PowerShell.RSJob')]
     [cmdletbinding(
         DefaultParameterSetName='All'
     )]
     Param (
-        [parameter(ValueFromPipeline=$True,ParameterSetName='Job')]
-        [PoshRS.PowerShell.RSJob[]]$Job,
         [parameter(ValueFromPipeline=$True,ValueFromPipelineByPropertyName=$True,
         ParameterSetName='Name')]
         [string[]]$Name,
@@ -49,43 +72,57 @@ Function Wait-RSJob {
         [parameter(ValueFromPipeline=$True,ValueFromPipelineByPropertyName=$True,
         ParameterSetName='Guid')]
         [guid[]]$InstanceID,
+        [parameter(ParameterSetName='Batch')]
         [parameter(ParameterSetName='Name')]
         [parameter(ParameterSetName='Id')]
         [parameter(ParameterSetName='Guid')]
         [parameter(ParameterSetName='All')]
         [ValidateSet('NotStarted','Running','Completed','Failed','Stopping','Stopped','Disconnected')]
         [string[]]$State,
+        [parameter(ValueFromPipelineByPropertyName=$True,
+        ParameterSetName='Batch')]
+        [string[]]$Batch,
+        [parameter(ParameterSetName='Batch')]
         [parameter(ParameterSetName='Name')]
         [parameter(ParameterSetName='Id')]
         [parameter(ParameterSetName='Guid')]
         [parameter(ParameterSetName='All')]
         [Switch]$HasMoreData,
-		[int]$Timeout
+        [parameter(ValueFromPipeline=$True,ParameterSetName='Job')]
+        [PoshRS.PowerShell.RSJob[]]$Job        
     )
     Begin {
         If ($PSBoundParameters['Debug']) {
             $DebugPreference = 'Continue'
         }        
-        Write-Verbose "ParameterSet: $($PSCmdlet.parametersetname)"
+        Write-Debug "ParameterSet: $($PSCmdlet.parametersetname)"
         $List = New-Object System.Collections.ArrayList
         $WhereList = New-Object System.Collections.ArrayList
         
         #Take care of bound parameters
         If ($PSBoundParameters['Name']) {
             [void]$list.AddRange($Name)
+            $Bound = $True
+        }
+        If ($PSBoundParameters['Batch']) {
+            [void]$list.AddRange($Batch)
+            $Bound = $True
         }
         If ($PSBoundParameters['Id']) {
             [void]$list.AddRange($Id)
+            $Bound = $True
         }
         If ($PSBoundParameters['InstanceId']) {
             [void]$list.AddRange($InstanceId)
+            $Bound = $True
         }
-		If ($PSBoundParameters['Job']){
-			[void]$list.AddRange($Job)
-		}		
+        If ($PSBoundParameters['Job']){
+            [void]$list.AddRange($Job)
+            $Bound = $True
+        }                
     }
     Process {
-        If ($PSCmdlet.ParameterSetName -ne 'All') {
+        If ($PSCmdlet.ParameterSetName -ne 'All' -AND -NOT $Bound) {
             Write-Verbose "Adding $($_)"
             [void]$List.Add($_)
         }
@@ -105,43 +142,32 @@ Function Wait-RSJob {
                 [void]$WhereList.Add("`$_.InstanceId -match $Items")  
             }
             'Job' {
-                $Items = '"{0}"' -f (($list | Select -Expand id | ForEach {"^{0}$" -f $_}) -join '|')
+                $Items = '"{0}"' -f (($list | ForEach {"^{0}$" -f $_.Id}) -join '|')
                 [void]$WhereList.Add("`$_.id -match $Items")
-            }			
+            }   
+            'Batch' {
+                $Items = '"{0}"' -f (($list | ForEach {"^{0}$" -f $_}) -join '|')
+                [void]$WhereList.Add("`$_.batch -match $Items")
+            }                      
         }
-        If ($PSBoundParameters['State']) {get-
+        If ($PSBoundParameters['State']) {
             [void]$WhereList.Add("`$_.State -match `"$($State -join '|')`"")
         }
         If ($PSBoundParameters.ContainsKey('HasMoreData')) {
             [void]$WhereList.Add("`$_.HasMoreData -eq `$$HasMoreData")
         }
+        Write-Debug "WhereListCount: $($WhereList.count)"
         If ($WhereList.count -gt 0) {
             $WhereString = $WhereList -join ' -AND '
-            $ScriptBlock = [scriptblock]::Create($WhereString)
+            $WhereBlock = [scriptblock]::Create($WhereString)
         }               
-        If ($ScriptBlock) {
-            Write-Verbose "WhereString: $($WhereString)" 
+        If ($WhereBlock) {
+            Write-Debug "WhereString: $($WhereString)" 
             Write-Verbose "Using scriptblock"
-            $FilteredJobs = @($list | Where $ScriptBlock)
-            Write-Verbose "$($FilteredJobs.Count)"
-			$Date = Get-Date
-			Do{
-				$Waitjobs = @($FilteredJobs | Where {
-                    $_.State -notmatch 'Completed|Failed|Stopped|Suspended|Disconnected'
-                })
-				Write-Verbose "$($Waitjobs.Count) Jobs Left"
-				if($Timeout){
-					if((New-Timespan $Date).TotalSeconds -ge $Timeout){
-						$TimedOut = $True
-                        break
-					}
-				}
-			}While($Waitjobs.Count -ne 0)
-        }
-        If (-NOT $TimedOut) {
-            #Wait just a bit so the HasMoreData can update if needed
-            Start-Sleep -Milliseconds 100
-            $FilteredJobs
+            $PoshRS_Jobs | Where $WhereBlock 
+        } 
+        Else {
+            $PoshRS_Jobs
         }
     }
 }

@@ -1,38 +1,43 @@
-Function Receive-RSJob {
+Function Stop-RSJob {
     <#
         .SYNOPSIS
-            Gets the results of the Windows PowerShell runspace jobs in the current session.
+            Stops a Windows PowerShell runspace job.
 
         .DESCRIPTION
-            Gets the results of the Windows PowerShell runspace jobs in the current session. You can use
-            Get-RSJob and pipe the results into this function to get the results as well.
+            Stops a Windows PowerShell background job that has been started using Start-RSJob
 
         .PARAMETER Name
-            The name of the jobs to receive available data from.
+            The name of the jobs to stop..
 
         .PARAMETER ID
-            The ID of the jobs to receive available data from.
+            The ID of the jobs to stop.
 
         .PARAMETER InstanceID
-            The GUID of the jobs to receive available data from.          
+            The GUID of the jobs to stop.
+            
+        .PARAMETER Job
+            The job object to stop.  
+            
+        .PARAMETER Batch 
+            Name of the set of jobs                   
 
         .NOTES
-            Name: Receive-RSJob
+            Name: Stop-RSJob
             Author: Boe Prox                
 
         .EXAMPLE
-            Get-RSJob -State Completed | Receive-RSJob
+            Get-RSJob -State Completed | Stop-RSJob
 
             Description
             -----------
-            Retrieves any available data that is outputted from completed RSJobs.
+            Stop all jobs with a State of Completed.
 
         .EXAMPLE
-            Receive-RSJob -ID 1,5,78
+            Stop-RSJob -ID 1,5,78
 
             Description
             -----------
-            Receives data from RSJob with IDs 1,5,78.
+            Stop jobs with IDs 1,5,78.
     #>
     [cmdletbinding(
         DefaultParameterSetName='Job'
@@ -47,13 +52,17 @@ Function Receive-RSJob {
         [parameter(ValueFromPipeline=$True,ValueFromPipelineByPropertyName=$True,
         ParameterSetName='Guid')]
         [guid[]]$InstanceID,
+        [parameter(ValueFromPipelineByPropertyName=$True,
+        ParameterSetName='Batch')]
+        [string[]]$Batch,
         [parameter(ValueFromPipeline=$True,ParameterSetName='Job')]
         [PoshRS.PowerShell.RSJob[]]$Job
     )
-    Begin {
+    Begin {        
         If ($PSBoundParameters['Debug']) {
             $DebugPreference = 'Continue'
-        }        
+        }  
+        Write-Debug "Begin"      
         $List = New-Object System.Collections.ArrayList
         $StringBuilder = New-Object System.Text.StringBuilder
 
@@ -74,6 +83,11 @@ Function Receive-RSJob {
             [void]$list.AddRange($Job)
             $Bound = $True
         }
+        If ($PSBoundParameters['Batch']) {
+            [void]$list.AddRange($Batch)
+            $Bound = $True
+        }
+        Write-Debug "Process"
     }
     Process {
         If (-Not $Bound) {
@@ -81,6 +95,7 @@ Function Receive-RSJob {
         }
     }
     End {
+        Write-Debug "End"
         Write-Debug "ParameterSet: $($PSCmdlet.parametersetname)"
         Switch ($PSCmdlet.parametersetname) {
             'Name' {
@@ -98,14 +113,27 @@ Function Receive-RSJob {
                 [void]$StringBuilder.Append("`$_.InstanceId -match $Items")   
                 $ScriptBlock = [scriptblock]::Create($StringBuilder.ToString())   
             }
+            'Batch' {
+                $Items = '"{0}"' -f (($list | ForEach {"^{0}$" -f $_}) -join '|')
+                [void]$StringBuilder.Append("`$_.batch -match $Items")   
+                $ScriptBlock = [scriptblock]::Create($StringBuilder.ToString()) 
+            } 	
             Default {$ScriptBlock=$Null}
         }
         If ($ScriptBlock) {
-            $jobs | Where $ScriptBlock | Select -ExpandProperty Output
+            Write-Verbose "Using ScriptBlock"
+            $ToStop = $PoshRS_jobs | Where $ScriptBlock
         } Else {
-            ForEach ($Item in $list) {
-                $Item.Output
+            $ToStop = $List
+        }
+        [System.Threading.Monitor]::Enter($PoshRS_jobs.syncroot) 
+        $ToStop | ForEach {            
+            Write-Verbose "Stopping $($_.InstanceId)"
+            if ($_.State -ne 'Completed') {
+                Write-Verbose "Killing job $($_.InstanceId)"
+                [void] $_.InnerJob.Stop()
             }
         }
-    }
+        [System.Threading.Monitor]::Exit($PoshRS_jobs.syncroot)
+    }  
 }
