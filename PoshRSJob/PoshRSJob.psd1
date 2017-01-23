@@ -1,7 +1,7 @@
 ﻿
 #
 # PoshRSJob
-# Version 1.5.7.7
+# Version 1.7.3.5
 #
 # Boe Prox (c) 2014
 # http://learn-powershell.net
@@ -14,7 +14,7 @@
 ModuleToProcess = 'PoshRSJob.psm1'
 
 # Version number of this module.
-ModuleVersion = '1.5.7.7'
+ModuleVersion = '1.7.3.5'
 
 # ID used to uniquely identify this module
 GUID = '9b17fb0f-e939-4a5c-b194-3f2247452972'
@@ -53,10 +53,10 @@ Description = 'Module designed to use PowerShell runspaces to create jobs that a
 #RequiredModules = @()
 
 # Assemblies that must be loaded prior to importing this module
-RequiredAssemblies = @('bin\PoshRS.PowerShell.dll')
+#RequiredAssemblies = @()
 
 # Script files (.ps1) that are run in the caller's environment prior to importing this module
-#ScriptsToProcess = @()
+ScriptsToProcess = @('Scripts\TabExpansion.ps1')
 
 # Type files (.ps1xml) to be loaded when importing this module
 #TypesToProcess = 'TypeData\PoshRSJob.Types.ps1xml'
@@ -84,13 +84,39 @@ AliasesToExport = 'gsj','rmsj','rsj','spsj','ssj','wsj'
 #ModuleList = @()
 
 # List of all files packaged with this module
-FileList = 'PoshRSJob.psd1', 'PoshRSJob.psm1', 'about_PoshRSJob.txt', 'ConvertScript.ps1', 'ConvertScriptBlockV2.ps1', 
-    'FindFunction.ps1', 'GetParamVariable.ps1', 'GetUsingVariables.ps1', 'GetUsingVariablesV2.ps1', 'GetUsingVariableValues.ps1', 
-    'Increment.ps1', 'IsExistingParamBlock.ps1', 'RegisterScriptScopeFunction.ps1', 'Get-RSJob.ps1', 'Receive-RSJob.ps1', 'Remove-RSJob.ps1', 
-    'Start-RSJob.ps1', 'Stop-RSJob.ps1', 'Wait-RSJob.ps1', 'PoshRSJob.Format.ps1xml', 'PoshRSJob.Types.ps1xml'
+FileList = 'PoshRSJob.psd1', 'PoshRSJob.psm1', 'en-US\about_PoshRSJob.help.txt', 'Private\ConvertScript.ps1', 'Private\ConvertScriptBlockV2.ps1', 
+'Private\FindFunction.ps1', 'Private\GetParamVariable.ps1', 'Private\GetUsingVariables.ps1', 'Private\GetUsingVariablesV2.ps1', 'Private\GetUsingVariableValues.ps1', 
+'Private\Increment.ps1', 'Private\IsExistingParamBlock.ps1', 'Private\RegisterScriptScopeFunction.ps1', 'Public\Get-RSJob.ps1', 'Public\Receive-RSJob.ps1', 
+'Public\Remove-RSJob.ps1', 'Public\Start-RSJob.ps1', 'Public\Stop-RSJob.ps1', 'Public\Wait-RSJob.ps1', 'TypeData\PoshRSJob.Format.ps1xml', 'TypeData\PoshRSJob.Types.ps1xml',
+'Private\SetIsReceived.ps1'
 
 # Private data to pass to the module specified in ModuleToProcess
-PrivateData = ''
-
+PrivateData = @{
+    PSData = @{
+			# The primary categorization of this module (from the TechNet Gallery tech tree).
+			Category = "Multithreading"
+			
+			# Keyword tags to help users find this module via navigations and search.
+			Tags = @('PoshRSJob', 'Runspace','RunspacePool', 'Linux', 'PowerShellCore', 'RSJob')
+			
+			# The web address of an icon which can be used in galleries to represent this module
+			#IconUri = ''
+			
+			# The web address of this module's project or support homepage.
+			ProjectUri = "https://github.com/proxb/PoshRSJob"
+			
+			# The web address of this module's license. Points to a page that's embeddable and linkable.
+			LicenseUri = "https://opensource.org/licenses/MIT"
+			
+			# Release notes for this particular version of the module
+			# ReleaseNotes = False
+			
+			# If true, the LicenseUrl points to an end-user license (not just a source license) which requires the user agreement before use.
+			RequireLicenseAcceptance = "False"
+			
+			# Indicates this is a pre-release/testing version of the module.
+			IsPrerelease = 'False'
+		}
+    }
 }
 

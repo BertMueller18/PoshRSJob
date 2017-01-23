@@ -8,7 +8,7 @@ Function Receive-RSJob {
             Get-RSJob and pipe the results into this function to get the results as well.
 
         .PARAMETER InputObject
-            Represents the PoshRS.PowerShell.RSJob object being sent to command.
+            Represents the RSJob object being sent to command.
 
         .PARAMETER Name
             The name of the jobs to receive available data from.
@@ -52,7 +52,7 @@ Function Receive-RSJob {
     )]
     Param (
         [parameter(Position=0,ValueFromPipeline=$True,ParameterSetName='Job')]
-        [PoshRS.PowerShell.RSJob[]]$InputObject,
+        [RSJob[]]$InputObject,
         [parameter(Position=1,ValueFromPipeline=$True,ValueFromPipelineByPropertyName=$True,
         ParameterSetName='Name')]
         [string[]]$Name,
@@ -73,6 +73,7 @@ Function Receive-RSJob {
         $List = New-Object System.Collections.ArrayList
         $StringBuilder = New-Object System.Text.StringBuilder
         $Bound = $False
+        $IsInputObject = $False
 
         #Take care of bound parameters
         If ($PSBoundParameters['Name']) {
@@ -88,6 +89,7 @@ Function Receive-RSJob {
             $Bound = $True
         }
         If ($PSBoundParameters['InputObject']) {
+            $IsInputObject = $True
             [void]$list.AddRange($InputObject)
             $Bound = $True
         }
@@ -95,18 +97,22 @@ Function Receive-RSJob {
             [void]$list.AddRange($Batch)
             $Bound = $True
         }
-        Write-Verbose "Bound: $Bound"
+        Write-Debug "Bound: $Bound"
     }
     Process {
         If (-NOT $Bound -and $InputObject) {
+            $IsInputObject = $True
             $_ | WriteStream
+            if (@("Completed", "Failed", "Stopped") -contains $_.State) { 
+                $_ | SetIsReceived -SetTrue
+            }
         }
         elseif (-Not $Bound) {
             [void]$List.Add($_)
         }
     }
     End {
-        Write-Verbose "ParameterSet: $($PSCmdlet.parametersetname)"
+        Write-Debug "ParameterSet: $($PSCmdlet.parametersetname)"
         Switch ($PSCmdlet.parametersetname) {
             'Name' {
                 $Items = '"{0}"' -f (($list | ForEach {"^{0}$" -f $_}) -join '|') -replace '\*','.*'
@@ -130,14 +136,32 @@ Function Receive-RSJob {
             } 	
             Default {$ScriptBlock=$Null}
         }
-        Write-Verbose "ScriptBlock: $($ScriptBlock)"
+        Write-Debug "ScriptBlock: $($ScriptBlock)"
         If ($ScriptBlock) {
-            Write-Verbose "Running Scriptblock"
-            $PoshRS_jobs | Where $ScriptBlock | WriteStream
-        } ElseIf ($Bound) {
-            $PoshRS_jobs | WriteStream
+            Write-Debug "Running Scriptblock"
+            $PoshRS_jobs | Where $ScriptBlock | ForEach-Object{ 
+                $_ | WriteStream
+                if (@("Completed", "Failed", "Stopped") -contains $_.State) { 
+                    $_ | SetIsReceived -SetTrue
+                }
+            }
+        } 
+        ElseIf ($IsInputObject) {
+            $List | ForEach-Object{ 
+                $_ | WriteStream
+                if (@("Completed", "Failed", "Stopped") -contains $_.State) { 
+                    $_ | SetIsReceived -SetTrue
+                }
+            }            
+        }
+        ElseIf ($Bound) {
+            $PoshRS_jobs | ForEach-Object{ 
+                $_ | WriteStream
+                if (@("Completed", "Failed", "Stopped") -contains $_.State) { 
+                    $_ | SetIsReceived -SetTrue
+                }
+            }
         }
     }
 }
-
 

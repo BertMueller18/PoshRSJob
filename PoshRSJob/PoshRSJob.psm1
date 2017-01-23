@@ -1,15 +1,116 @@
 $ScriptPath = Split-Path $MyInvocation.MyCommand.Path
 $PSModule = $ExecutionContext.SessionState.Module 
 $PSModuleRoot = $PSModule.ModuleBase
+##TODO Added IsReceived properties and SetIsReceived function; not complete and needs tested //BCP 12/28/2016
+If ($PSVersionTable.PSEdition -eq 'Core') {
+#PowerShell V4 and below will throw a parser error even if I never use the classes keyword
+@'
+    class V2UsingVariable {
+        [string]$Name
+        [string]$NewName
+        [object]$Value
+        [string]$NewVarName
+    }
+ 
+    class RSRunspacePool{
+        [System.Management.Automation.Runspaces.RunspacePool]$RunspacePool
+        [System.Management.Automation.Runspaces.RunspacePoolState]$State
+        [int]$AvailableJobs
+        [int]$MaxJobs
+        [DateTime]$LastActivity = [DateTime]::MinValue
+        [String]$RunspacePoolID
+        [bool]$CanDispose = $False
+    }
+    class RSJob {
+        [string]$Name
+        [int]$ID
+        [System.Management.Automation.PSInvocationState]$State
+        [object]$InputObject
+        [string]$InstanceID
+        [object]$Handle
+        [object]$Runspace
+        [System.Management.Automation.PowerShell]$InnerJob
+        [System.Threading.ManualResetEvent]$Finished
+        [string]$Command
+        [System.Management.Automation.PSDataCollection[System.Management.Automation.ErrorRecord]]$Error
+        [System.Management.Automation.PSDataCollection[System.Management.Automation.VerboseRecord]]$Verbose
+        [System.Management.Automation.PSDataCollection[System.Management.Automation.DebugRecord]]$Debug
+        [System.Management.Automation.PSDataCollection[System.Management.Automation.WarningRecord]]$Warning
+        [System.Management.Automation.PSDataCollection[System.Management.Automation.ProgressRecord]]$Progress
+        [bool]$HasMoreData = $True
+        [bool]$HasErrors
+        [object]$Output
+        [string]$RunspacePoolID
+        [bool]$Completed = $False
+        [string]$Batch
+        hidden [bool] $IsReceived = $False
 
-#region RSJob Collections
+    }
+'@ | Invoke-Expression
+}
+Else {
+    Add-Type @"
+    using System;
+    using System.Collections.Generic;
+    using System.Text;
+    using System.Management.Automation;
+ 
+    public class V2UsingVariable
+    {
+        public string Name;
+        public string NewName;
+        public object Value;
+        public string NewVarName;
+    }
+ 
+    public class RSRunspacePool
+    {
+        public System.Management.Automation.Runspaces.RunspacePool RunspacePool;
+        public System.Management.Automation.Runspaces.RunspacePoolState State;
+        public int AvailableJobs;
+        public int MaxJobs;
+        public DateTime LastActivity = DateTime.MinValue;
+        public string RunspacePoolID;
+        public bool CanDispose = false;
+    }
+    public class RSJob
+    {
+        public string Name;
+        public int ID;
+        public System.Management.Automation.PSInvocationState State;
+        public object InputObject;
+        public string InstanceID;
+        public object Handle;
+        public object Runspace;
+        public System.Management.Automation.PowerShell InnerJob;
+        public System.Threading.ManualResetEvent Finished;
+        public string Command;
+        public System.Management.Automation.PSDataCollection<System.Management.Automation.ErrorRecord> Error;
+        public System.Management.Automation.PSDataCollection<System.Management.Automation.VerboseRecord> Verbose;
+        public System.Management.Automation.PSDataCollection<System.Management.Automation.DebugRecord> Debug;
+        public System.Management.Automation.PSDataCollection<System.Management.Automation.WarningRecord> Warning;
+        public System.Management.Automation.PSDataCollection<System.Management.Automation.ProgressRecord> Progress;
+        public bool HasMoreData = true;
+        public bool HasErrors;
+        public object Output;
+        public string RunspacePoolID;
+        public bool Completed = false;
+        public string Batch;
+        #pragma warning disable 414
+        private bool IsReceived = false;
+        #pragma warning restore 414
+    }
+"@
+}
+
+#region RSJob Variables
 Write-Verbose "Creating RS collections"
 New-Variable PoshRS_Jobs -Value ([System.Collections.ArrayList]::Synchronized([System.Collections.ArrayList]@())) -Option ReadOnly -Scope Global -Force
 New-Variable PoshRS_jobCleanup -Value ([hashtable]::Synchronized(@{})) -Option ReadOnly -Scope Global -Force
 New-Variable PoshRS_JobID -Value ([int64]0) -Option ReadOnly -Scope Global -Force
 New-Variable PoshRS_RunspacePools -Value ([System.Collections.ArrayList]::Synchronized([System.Collections.ArrayList]@())) -Option ReadOnly -Scope Global -Force
 New-Variable PoshRS_RunspacePoolCleanup -Value ([hashtable]::Synchronized(@{})) -Option ReadOnly -Scope Global -Force
-#endregion RSJob Collections
+#endregion RSJob Variables
 
 #region Cleanup Routine
 Write-Verbose "Creating routine to monitor RS jobs"
@@ -24,8 +125,7 @@ $PoshRS_jobCleanup.PowerShell = [PowerShell]::Create().AddScript({
     #$PoshRS_jobCleanup.Host.UI.WriteVerboseLine("Begin Do Loop") 
     Do {   
         [System.Threading.Monitor]::Enter($PoshRS_Jobs.syncroot) 
-        Foreach($job in $PoshRS_Jobs) {
-            $job.state = $job.InnerJob.InvocationStateInfo.State
+        Foreach($job in $PoshRS_Jobs) {            
             If ($job.Handle.isCompleted -AND (-NOT $Job.Completed)) {   
                 #$PoshRS_jobCleanup.Host.UI.WriteVerboseLine("$($Job.Id) completed")  
                 Try {           
@@ -58,7 +158,7 @@ $PoshRS_jobCleanup.PowerShell = [PowerShell]::Create().AddScript({
                 #Return type from Invoke() is a generic collection; need to verify the first index is not NULL
                 If (($Data.Count -gt 0) -AND (-NOT ($Data.Count -eq 1 -AND $Null -eq $Data[0]))) {   
                     $job.output = $Data
-                    $job.HasMoreData = $True                            
+                    $job.HasMoreData = $True                           
                 }              
                 $Error.Clear()
             } 
@@ -73,16 +173,17 @@ $PoshRS_jobCleanup.Handle = $PoshRS_jobCleanup.PowerShell.BeginInvoke()
 Write-Verbose "Creating routine to monitor Runspace Pools"
 $PoshRS_RunspacePoolCleanup.Flag=$True
 $PoshRS_RunspacePoolCleanup.Host=$Host
-#5 minute timeout for unused runspace pools
-$PoshRS_RunspacePoolCleanup.Timeout = [timespan]::FromMinutes(1).Ticks
-$PoshRS_RunspacePoolCleanup.Runspace =[runspacefactory]::CreateRunspace()
+#2 minute timeout for unused runspace pools
+$PoshRS_RunspacePoolCleanup.Timeout = [timespan]::FromMinutes(2).Ticks
+$InitialSessionState = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
  
-#Create Type Collection so the object will work properly 
-$Types = Get-ChildItem "$($PSScriptRoot)\TypeData" -Filter *Types* | Select -ExpandProperty Fullname 
-$Types | ForEach { 
-    $TypeEntry = New-Object System.Management.Automation.Runspaces.TypeConfigurationEntry -ArgumentList $_ 
-    $PoshRS_RunspacePoolCleanup.Runspace.RunspaceConfiguration.types.Append($TypeEntry) 
-} 
+#Create Type Collection so the object will work properly
+$Types = Get-ChildItem "$($PSScriptRoot)\TypeData" -Filter *Types* | Select -ExpandProperty Fullname
+ForEach ($Type in $Types) {
+    $TypeConfigEntry = New-Object System.Management.Automation.Runspaces.SessionStateTypeEntry -ArgumentList $Type
+    $InitialSessionState.Types.Add($TypeConfigEntry)
+}
+$PoshRS_RunspacePoolCleanup.Runspace =[runspacefactory]::CreateRunspace($InitialSessionState)
   
 $PoshRS_RunspacePoolCleanup.Runspace.Open()         
 $PoshRS_RunspacePoolCleanup.Runspace.SessionStateProxy.SetVariable("PoshRS_RunspacePoolCleanup",$PoshRS_RunspacePoolCleanup)     
@@ -91,6 +192,7 @@ $PoshRS_RunspacePoolCleanup.Runspace.SessionStateProxy.SetVariable("ParentHost",
 $PoshRS_RunspacePoolCleanup.PowerShell = [PowerShell]::Create().AddScript({
     #Routine to handle completed runspaces
     Do { 
+        #$ParentHost.ui.WriteVerboseLine("Beginning Do Statement")
         $DisposePoshRS_RunspacePools=$False  
         If ($PoshRS_RunspacePools.Count -gt 0) { 
             #$ParentHost.ui.WriteVerboseLine("$($PoshRS_RunspacePools | Out-String)")           
@@ -104,6 +206,11 @@ $PoshRS_RunspacePoolCleanup.PowerShell = [PowerShell]::Create().AddScript({
                         $RunspacePool.RunspacePool.Dispose()
                         $RunspacePool.CanDispose = $True
                         $DisposePoshRS_RunspacePools=$True
+
+                        #Perform garbage collection
+                        [gc]::Collect()
+                        Start-Sleep -Seconds 5
+                        [gc]::Collect()
                     }
                 } Else {
                     $RunspacePool.LastActivity = (Get-Date)
@@ -119,9 +226,11 @@ $PoshRS_RunspacePoolCleanup.PowerShell = [PowerShell]::Create().AddScript({
                     [void]$PoshRS_RunspacePools.Remove($_)
                 }
             }
-            Remove-Variable TempCollection
+            #Not setting this to silentlycontinue seems to cause another runspace to be created if an error occurs
+            Remove-Variable TempCollection -ErrorAction SilentlyContinue
             [System.Threading.Monitor]::Exit($PoshRS_RunspacePools.syncroot)
         }
+            #$ParentHost.ui.WriteVerboseLine("Sleeping")
         Start-Sleep -Milliseconds 5000     
     } while ($PoshRS_RunspacePoolCleanup.Flag)
 })

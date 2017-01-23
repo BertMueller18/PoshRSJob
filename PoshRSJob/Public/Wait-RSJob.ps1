@@ -55,7 +55,7 @@ Function Wait-RSJob {
     )]
     Param (
         [parameter(ValueFromPipeline=$True,ParameterSetName='Job')]
-        [PoshRS.PowerShell.RSJob[]]$Job,
+        [RSJob[]]$Job,
         [parameter(ValueFromPipelineByPropertyName=$True,
         ParameterSetName='Name')]
         [string[]]$Name,
@@ -115,7 +115,10 @@ Function Wait-RSJob {
             [void]$List.Add($_)
         }
     }
-    End {        
+    End {     
+        If ($List.count -eq 0) {
+            return
+        }   
         Switch ($PSCmdlet.parametersetname) {
             'Name' {
                 $Items = '"{0}"' -f (($list | ForEach {"^{0}$" -f $_}) -join '|') -replace '\*','.*'
