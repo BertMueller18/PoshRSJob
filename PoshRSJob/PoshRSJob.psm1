@@ -2,7 +2,7 @@ $ScriptPath = Split-Path $MyInvocation.MyCommand.Path
 $PSModule = $ExecutionContext.SessionState.Module 
 $PSModuleRoot = $PSModule.ModuleBase
 ##TODO Added IsReceived properties and SetIsReceived function; not complete and needs tested //BCP 12/28/2016
-If ($PSVersionTable.PSEdition -eq 'Core') {
+If ($PSVersionTable['PSEdition'] -and $PSVersionTable.PSEdition -eq 'Core') {
 #PowerShell V4 and below will throw a parser error even if I never use the classes keyword
 @'
     class V2UsingVariable {
@@ -178,7 +178,7 @@ $PoshRS_RunspacePoolCleanup.Timeout = [timespan]::FromMinutes(2).Ticks
 $InitialSessionState = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
  
 #Create Type Collection so the object will work properly
-$Types = Get-ChildItem "$($PSScriptRoot)\TypeData" -Filter *Types* | Select -ExpandProperty Fullname
+$Types = Get-ChildItem "$($PSScriptRoot)\TypeData" -Filter *Types* | Select-Object -ExpandProperty Fullname
 ForEach ($Type in $Types) {
     $TypeConfigEntry = New-Object System.Management.Automation.Runspaces.SessionStateTypeEntry -ArgumentList $Type
     $InitialSessionState.Types.Add($TypeConfigEntry)
@@ -219,9 +219,9 @@ $PoshRS_RunspacePoolCleanup.PowerShell = [PowerShell]::Create().AddScript({
             #Remove runspace pools
             If ($DisposePoshRS_RunspacePools) {
                 $TempCollection = $PoshRS_RunspacePools.Clone()
-                $TempCollection | Where {
+                $TempCollection | Where-Object {
                     $_.CanDispose
-                } | ForEach {
+                } | ForEach-Object {
                     #$ParentHost.ui.WriteVerboseLine("Removing runspacepool <$($_.RunspaceID)>")
                     [void]$PoshRS_RunspacePools.Remove($_)
                 }
@@ -240,7 +240,7 @@ $PoshRS_RunspacePoolCleanup.Handle = $PoshRS_RunspacePoolCleanup.PowerShell.Begi
 
 #region Load Public Functions
 Try {
-    Get-ChildItem "$ScriptPath\Public" -Filter *.ps1 | Select -Expand FullName | ForEach {
+    Get-ChildItem "$ScriptPath\Public" -Filter *.ps1 | Select-Object -ExpandProperty FullName | ForEach-Object {
         $Function = Split-Path $_ -Leaf
         . $_
     }
@@ -252,7 +252,7 @@ Try {
 
 #region Load Private Functions
 Try {
-    Get-ChildItem "$ScriptPath\Private" -Filter *.ps1 | Select -Expand FullName | ForEach {
+    Get-ChildItem "$ScriptPath\Private" -Filter *.ps1 | Select-Object -ExpandProperty FullName | ForEach-Object {
         $Function = Split-Path $_ -Leaf
         . $_
     }
@@ -283,7 +283,7 @@ New-Alias -Name wsj -Value Wait-RSJob -Force
 #endregion Aliases
 
 #region Handle Module Removal
-$ExecutionContext.SessionState.Module.OnRemove ={
+$PoshRS_OnRemoveScript = {
     $PoshRS_jobCleanup.Flag=$False
     $PoshRS_RunspacePoolCleanup.Flag=$False
     #Let sit for a second to make sure it has had time to stop
@@ -298,6 +298,8 @@ $ExecutionContext.SessionState.Module.OnRemove ={
     Remove-Variable PoshRS_RunspacePoolCleanup -Scope Global -Force
     Remove-Variable PoshRS_RunspacePools -Scope Global -Force
 }
+$ExecutionContext.SessionState.Module.OnRemove += $PoshRS_OnRemoveScript
+Register-EngineEvent -SourceIdentifier ([System.Management.Automation.PsEngineEvent]::Exiting) -Action $PoshRS_OnRemoveScript
 #endregion Handle Module Removal
 
 #region Export Module Members
