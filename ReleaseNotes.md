@@ -1,4 +1,37 @@
 ---------
+|1.7.3.11|
+---------
+* #139 (Wait-RSJob is not working with parameter set Name or ID)
+* #140 (Wait-RSJob doesn't sleep)
+* #141 (-RSJob question)
+
+---------
+|1.7.3.10|
+---------
+* #139 (Wait-RSJob is not working with parameter set Name or ID.)
+
+---------
+|1.7.3.9|
+---------
+* #42 (V2 Pester test hangs in AppVeyor)
+* #121 (Missing output from Start-RSJob *bug*)
+* #122 (Output stream is not always cleared when using pooled runspaces)
+* #136 (RSJob on PSv2)
+
+---------
+|1.7.3.8|
+---------
+* #133 (Passing synchronized hashtable as argument does not work)
+* #132 (Not handling single parameter in ArgumentList correctly)
+* #136 (RSJob on PSv2) - Some parts may be fixed with how reflection is used
+
+---------
+|1.7.3.7|
+---------
+* #127 (Module loading failure with high throttle counts (and possibly related skipped jobs))
+* #107 (Write-Stream throws lots of spurious errors on missing variables )
+
+---------
 |1.7.3.6|
 ---------
 * (FunctionsToLoad doesn't work if a script is called within a script)

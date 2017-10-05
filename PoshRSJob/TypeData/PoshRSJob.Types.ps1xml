@@ -7,10 +7,11 @@
         <GetScriptBlock>            
             $Flags = 'nonpublic','instance','static'
             $_Worker = $This.innerjob.GetType().GetField('worker',$Flags)
+            if ($_Worker -eq $null) { $_Worker = $This.innerjob.GetType().GetField('_worker',$Flags) }
             $Worker = $_Worker.GetValue($This.innerjob)
 
             $_CRP = $worker.GetType().GetProperty('CurrentlyRunningPipeline',$Flags)
-            $CRP = $_CRP.GetValue($Worker)
+            $CRP = $_CRP.GetValue($Worker, $Null)
             $State = If (-NOT $This.handle.IsCompleted -AND -NOT [bool]$CRP) {
                 [System.Management.Automation.PSInvocationState]::NotStarted
             }
@@ -59,10 +60,11 @@
         <GetScriptBlock>
             $Flags = 'nonpublic','instance','static'
             $_Worker = $This.innerjob.GetType().GetField('worker',$Flags)
+            if ($_Worker -eq $null) { $_Worker = $This.innerjob.GetType().GetField('_worker',$Flags) }
             $Worker = $_Worker.GetValue($This.innerjob)
 
             $_CRP = $worker.GetType().GetProperty('CurrentlyRunningPipeline',$Flags)
-            $CRP = $_CRP.GetValue($Worker)
+            $CRP = $_CRP.GetValue($Worker, $Null)
             If (-NOT $This.handle.IsCompleted -AND -NOT [bool]$CRP) {
                 [System.Management.Automation.PSInvocationState]::NotStarted
             }
@@ -83,7 +85,7 @@
             $this.innerjob.HadErrors
          }
          Else {
-            ($this.innerjob.Streams.Error -ne $null)
+            ($this.innerjob.Streams.Error.Count -ne 0)
          }
         </GetScriptBlock>
       </ScriptProperty>
